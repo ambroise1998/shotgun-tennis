@@ -26,11 +26,11 @@ on:
   workflow_dispatch:          # bouton "Run workflow" dans l'onglet Actions
     inputs:
       mode:
-        description: "Mode (snipe = attendre l'ouverture, now = chercher tout de suite)"
+        description: "links = envoie les liens du week-end | snipe = attend l'ouverture | now = cherche maintenant"
         required: true
-        default: "now"
+        default: "links"
         type: choice
-        options: [now, snipe]
+        options: [links, snipe, now]
   repository_dispatch:        # déclenchement depuis l'iPhone (raccourci Shortcuts)
     types: [shotgun]
 
@@ -59,7 +59,7 @@ jobs:
             MODE="${{ github.event.inputs.mode }}"
           elif [ "${{ github.event_name }}" = "repository_dispatch" ]; then
             MODE="${{ github.event.client_payload.mode }}"
-            if [ -z "$MODE" ] || [ "$MODE" = "null" ]; then MODE="now"; fi
+            if [ -z "$MODE" ] || [ "$MODE" = "null" ]; then MODE="links"; fi
           fi
           echo "mode=$MODE" >> "$GITHUB_OUTPUT"
           echo "Mode retenu : $MODE"

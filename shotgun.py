@@ -60,18 +60,31 @@ REDIRECT_BASE = os.environ.get("REDIRECT_BASE", "")
 
 
 def booking_url(date_str, slot):
-    """Lien vers l'écran de réservation AVEC le créneau pré-sélectionné.
+    """Lien vers l'écran de réservation, avec l'horaire pré-sélectionné.
     Ex: .../fr/club/<club>/tennis?date=2026-06-11&serviceId=<id>&time=08%3A00&duration=60
-    Si REDIRECT_BASE est défini, on enrobe l'URL dans la page de redirection
-    (…/go.html#<url>) pour que ça s'ouvre dans Safari (web), pas dans l'appli."""
-    direct = (f"{SITE}/fr/club/{CLUB_ID}/{ACTIVITY}"
-              f"?date={date_str}"
-              f"&serviceId={slot.get('service_id')}"
-              f"&time={urllib.parse.quote(slot.get('time',''))}"
-              f"&duration={slot.get('duration', 60)}")
+    Le serviceId est ajouté seulement s'il est connu (créneau ouvert). Sans lui,
+    la page reste valide et affiche les courts dispo pour cette date+heure :
+    on peut donc construire le lien AVANT l'ouverture."""
+    params = [f"date={date_str}"]
+    if slot.get("service_id"):
+        params.append(f"serviceId={slot['service_id']}")
+    if slot.get("time"):
+        params.append(f"time={urllib.parse.quote(slot['time'])}")
+    params.append(f"duration={slot.get('duration', 60)}")
+    direct = f"{SITE}/fr/club/{CLUB_ID}/{ACTIVITY}?" + "&".join(params)
     if REDIRECT_BASE:
         return f"{REDIRECT_BASE}#{urllib.parse.quote(direct, safe='')}"
     return direct
+
+
+def hourly_times(start_hhmm, end_hhmm):
+    """['10:00','11:00','12:00'] pour une fenêtre 10:00-12:00."""
+    s, e = _hhmm_to_minutes(start_hhmm), _hhmm_to_minutes(end_hhmm)
+    out, t = [], s
+    while t <= e:
+        out.append(f"{t // 60:02d}:{t % 60:02d}")
+        t += 60
+    return out
 
 # Jours visés : 5 = samedi, 6 = dimanche (lundi=0 ... dimanche=6)
 TARGET_WEEKDAYS = [int(x) for x in os.environ.get("TARGET_WEEKDAYS", "5,6").split(",")]
@@ -339,6 +352,51 @@ def scan_openings(now, weekdays, horizon_days):
     return res
 
 
+def mode_links():
+    """LE PLUS SIMPLE. Envoie tout de suite une notif avec les liens 10h/11h/12h du
+    week-end cible (même PAS encore ouvert) + l'heure d'ouverture. Tu tapes le lien
+    au moment de l'ouverture -> la page s'ouvre sur la bonne date+heure, prête."""
+    _, sd = http_get(availabilities_url(
+        (dt.datetime.now(PARIS_TZ)).date().isoformat(), WINDOW_START, WINDOW_END))
+    now = server_now(sd)
+    scans = scan_openings(now, TARGET_WEEKDAYS, SNIPE_SCAN_HORIZON_DAYS)
+
+    target_ds, opening, already = None, None, False
+    for ds, op, slots in scans:        # priorité à un week-end déjà ouvert
+        if slots:
+            target_ds, already = ds, True
+            break
+    if not target_ds:                  # sinon, la prochaine ouverture à venir
+        fut = sorted([(op, ds) for ds, op, _ in scans if op])
+        if fut:
+            opening, target_ds = fut[0]
+    if not target_ds and scans:        # filet de secours
+        target_ds = scans[0][0]
+    if not target_ds:
+        print("[links] Aucune date cible trouvée.")
+        notify("🎾 Liens Luxembourg", "Aucune date week-end trouvée pour l'instant.",
+               priority="default", tags="information")
+        return False
+
+    times = hourly_times(WINDOW_START, WINDOW_END)
+    actions = [(f"Réserver {t}", booking_url(target_ds, {"time": t, "duration": 60}))
+               for t in times][:3]
+    if already:
+        head = "déjà ouvert ✅"
+    elif opening:
+        head = f"ouvre {opening:%a %d/%m à %Hh%M}"
+    else:
+        head = "ouverture inconnue"
+    title = f"🎾 Liens Luxembourg — {target_ds}"
+    msg = (f"{target_ds} ({head}).\n"
+           f"Tape l'horaire voulu (au moment de l'ouverture) :")
+    notify(title, msg, click_url=actions[0][1], actions=actions, priority="default")
+    print(f"[links] Cible {target_ds} | {head}")
+    for lbl, u in actions:
+        print(f"  [{lbl}] {u}")
+    return True
+
+
 def mode_snipe():
     """Trouve le prochain créneau week-end (10h-13h) dont la réservation s'OUVRE bientôt,
     attend la seconde d'ouverture (lue dans l'API), mitraille, puis notifie.
@@ -469,7 +527,7 @@ def mode_test():
 
 def main():
     ap = argparse.ArgumentParser(description="Sniper de créneaux tennis AnyBuddy")
-    ap.add_argument("--mode", choices=["snipe", "now", "test"], default="snipe")
+    ap.add_argument("--mode", choices=["links", "snipe", "now", "test"], default="links")
     ap.add_argument("--test", action="store_true", help="raccourci pour --mode test")
     ap.add_argument("--topic", help="surcharge NTFY_TOPIC")
     ap.add_argument("--date", help="force une date jouable AAAA-MM-JJ (mode now)")
@@ -482,6 +540,8 @@ def main():
     mode = "test" if args.test else args.mode
     if mode == "test":
         mode_test()
+    elif mode == "links":
+        mode_links()
     elif mode == "now":
         if args.date:
             slots, rules, _ = fetch_day(args.date)
