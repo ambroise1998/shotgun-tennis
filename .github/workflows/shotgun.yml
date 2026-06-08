@@ -47,6 +47,8 @@ jobs:
       WINDOW_START: "10:00"
       WINDOW_END: "12:00"        # créneau d'1h démarrant au plus tard à 12h (fin 13h)
       ADVANCE_DAYS: "7"
+      # Page de redirection (GitHub Pages) -> ouvre le créneau dans Safari, pas l'appli
+      REDIRECT_BASE: "https://ambroise1998.github.io/shotgun-tennis/go.html"
     steps:
       - uses: actions/checkout@v4
 

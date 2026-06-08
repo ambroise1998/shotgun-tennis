@@ -46,8 +46,29 @@ import urllib.parse
 # ---------------------------------------------------------------------------
 CLUB_ID       = os.environ.get("CLUB_ID", "tennis-jardin-du-luxembourg")
 ACTIVITY      = os.environ.get("ACTIVITY", "tennis")
-CLUB_URL      = "https://www.anybuddyapp.com/fr/club/" + CLUB_ID  # page de réservation (?date=...)
+SITE          = "https://www.anybuddyapp.com"
+CLUB_URL      = SITE + "/fr/club/" + CLUB_ID  # page du club (?date=...)
 API_BASE      = "https://api.anybuddyapp.com/v2/centers"
+
+
+# Page de redirection (GitHub Pages) qui force l'ouverture dans Safari plutôt que
+# dans l'appli. Si vide, la notif pointe directement vers AnyBuddy (ouvre l'appli).
+REDIRECT_BASE = os.environ.get("REDIRECT_BASE", "")
+
+
+def booking_url(date_str, slot):
+    """Lien vers l'écran de réservation AVEC le créneau pré-sélectionné.
+    Ex: .../fr/club/<club>/tennis?date=2026-06-11&serviceId=<id>&time=08%3A00&duration=60
+    Si REDIRECT_BASE est défini, on enrobe l'URL dans la page de redirection
+    (…/go.html#<url>) pour que ça s'ouvre dans Safari (web), pas dans l'appli."""
+    direct = (f"{SITE}/fr/club/{CLUB_ID}/{ACTIVITY}"
+              f"?date={date_str}"
+              f"&serviceId={slot.get('service_id')}"
+              f"&time={urllib.parse.quote(slot.get('time',''))}"
+              f"&duration={slot.get('duration', 60)}")
+    if REDIRECT_BASE:
+        return f"{REDIRECT_BASE}#{urllib.parse.quote(direct, safe='')}"
+    return direct
 
 # Jours visés : 5 = samedi, 6 = dimanche (lundi=0 ... dimanche=6)
 TARGET_WEEKDAYS = [int(x) for x in os.environ.get("TARGET_WEEKDAYS", "5,6").split(",")]
@@ -129,6 +150,7 @@ def fetch_day(date_str):
                 "price_eur": services[0].get("price", 0) / 100.0,
                 "service_id": services[0].get("id"),
                 "slot_id": services[0].get("slotId"),
+                "duration": services[0].get("duration", 60),
             })
     slots.sort(key=lambda s: s["time"])
     return slots, rules, server_date
@@ -166,11 +188,15 @@ def server_now(server_date_header):
 
 _PRIORITY_MAP = {"min": 1, "low": 2, "default": 3, "high": 4, "urgent": 5, "max": 5}
 
-def notify(title, message, click_url=None, priority="urgent", tags="tennis"):
-    """Notification PUSH via ntfy.sh, au format JSON (gère l'unicode/emoji)."""
+def notify(title, message, click_url=None, priority="urgent", tags="tennis", actions=None):
+    """Notification PUSH via ntfy.sh, au format JSON (gère l'unicode/emoji).
+    `actions` = liste de (label, url) -> boutons « Réserver » (max 3)."""
     if not NTFY_TOPIC:
         print("  [notif] NTFY_TOPIC non défini -> notification ignorée (affichage local) :")
         print(f"  [notif] {title} | {message} | {click_url}")
+        if actions:
+            for lbl, u in actions:
+                print(f"  [notif]   bouton: {lbl} -> {u}")
         return False
     payload = {
         "topic": NTFY_TOPIC,
@@ -180,12 +206,16 @@ def notify(title, message, click_url=None, priority="urgent", tags="tennis"):
         "tags": [t.strip() for t in tags.split(",")] if tags else [],
     }
     if click_url:
-        payload["click"] = click_url           # tap sur la notif -> ouvre la page
+        payload["click"] = click_url           # tap sur le corps de la notif -> ouvre le lien
+    if actions:
+        payload["actions"] = [
+            {"action": "view", "label": lbl, "url": u, "clear": True}
+            for (lbl, u) in actions[:3]
+        ]
+    elif click_url:
         payload["actions"] = [{
-            "action": "view",
-            "label": "Réserver maintenant",
-            "url": click_url,
-            "clear": True,
+            "action": "view", "label": "Réserver maintenant",
+            "url": click_url, "clear": True,
         }]
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(NTFY_SERVER, data=data,
@@ -240,14 +270,18 @@ def announce(date_str, slots):
     title = f"🎾 Court libre {date_str} {best['time']} !"
     times = ", ".join(f"{s['time']} ({s['courts']} court{'s' if s['courts']>1 else ''})"
                       for s in slots)
-    msg = (f"Jardin du Luxembourg — {date_str}\n"
+    msg = (f"{CLUB_ID} — {date_str}\n"
            f"Dispo : {times}\n"
            f"Prix : {best['price_eur']:.0f}€ / court\n"
-           f"➡️ Tape pour réserver et payer.")
-    click = f"{CLUB_URL}?date={date_str}"
-    notify(title, msg, click_url=click)
+           f"➡️ Tape un horaire pour aller direct au paiement.")
+    # un bouton par horaire dispo (max 3) -> lien PRÉCIS vers le paiement
+    actions = [(f"Réserver {s['time']}", booking_url(date_str, s)) for s in slots[:3]]
+    click = booking_url(date_str, best)
+    notify(title, msg, click_url=click, actions=actions)
     print(f"  >>> {title}")
-    print(f"      {times}  | total {n} court(s) | lien {click}")
+    print(f"      {times}  | total {n} court(s)")
+    for lbl, u in actions:
+        print(f"      [{lbl}] {u}")
 
 
 # ---------------------------------------------------------------------------

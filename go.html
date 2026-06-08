@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ouverture de la réservation…</title>
+  <style>
+    body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;text-align:center;
+         padding:3em 1.5em;color:#222}
+    .dot{font-size:2.5em}
+    a{display:inline-block;margin-top:1.2em;font-size:1.1em}
+  </style>
+</head>
+<body>
+  <div class="dot">🎾</div>
+  <p>Ouverture du créneau dans Safari…</p>
+  <a id="manual" href="#">Si rien ne se passe, appuie ici</a>
+  <script>
+    // L'URL AnyBuddy cible est passée APRÈS le # (donc jamais envoyée au serveur).
+    // On redirige en JavaScript : une navigation programmée n'active PAS le lien
+    // universel de l'appli -> la page s'ouvre dans le navigateur, avec le créneau.
+    var target = decodeURIComponent((location.hash || "").slice(1));
+    if (target.indexOf("http") === 0) {
+      document.getElementById("manual").href = target;
+      location.replace(target);
+    } else {
+      document.body.innerHTML = "<p>Lien invalide.</p>";
+    }
+  </script>
+  <noscript>Active JavaScript pour continuer.</noscript>
+</body>
+</html>
