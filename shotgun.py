@@ -46,6 +46,9 @@ import urllib.parse
 # ---------------------------------------------------------------------------
 CLUB_ID       = os.environ.get("CLUB_ID", "tennis-jardin-du-luxembourg")
 ACTIVITY      = os.environ.get("ACTIVITY", "tennis")
+# Lien web standard. À ouvrir dans un navigateur TIERS (DuckDuckGo/Chrome) : ceux-ci
+# n'appliquent pas les "liens universels" iOS, donc ils chargent la page web (le bon
+# créneau) au lieu de basculer dans l'appli AnyBuddy (ce que fait Safari).
 SITE          = "https://www.anybuddyapp.com"
 CLUB_URL      = SITE + "/fr/club/" + CLUB_ID  # page du club (?date=...)
 API_BASE      = "https://api.anybuddyapp.com/v2/centers"
@@ -91,6 +94,8 @@ POLL_INTERVAL_MS  = int(os.environ.get("POLL_INTERVAL_MS", "300"))   # délai en
 SNIPE_LEAD_MS     = int(os.environ.get("SNIPE_LEAD_MS", "800"))      # démarre N ms avant l'ouverture
 MAX_SNIPE_SECONDS = int(os.environ.get("MAX_SNIPE_SECONDS", "120"))  # durée max de mitraillage
 NOW_DURATION_SEC  = int(os.environ.get("NOW_DURATION_SEC", "20"))    # durée du mode "now"
+SNIPE_SCAN_HORIZON_DAYS = int(os.environ.get("SNIPE_SCAN_HORIZON_DAYS", "14"))  # nb de jours scannés (2 sem. -> capte l'ouverture du week-end suivant)
+SNIPE_MAX_WAIT_MIN      = int(os.environ.get("SNIPE_MAX_WAIT_MIN", "30"))      # attente max (info) avant l'ouverture
 
 PARIS_TZ = dt.timezone(dt.timedelta(hours=2))  # Europe/Paris en été (CEST, UTC+2)
 
@@ -317,67 +322,101 @@ def mode_now():
     return found
 
 
+def scan_openings(now, weekdays, horizon_days):
+    """Pour chaque date sam/dim à venir (jusqu'à horizon), renvoie une liste de
+    (date_str, opening_dt|None, slots_déjà_ouverts)."""
+    res = []
+    for d in range(0, horizon_days + 1):
+        day = (now + dt.timedelta(days=d)).date()
+        if day.weekday() not in weekdays:
+            continue
+        ds = day.isoformat()
+        try:
+            slots, rules, _ = fetch_day(ds)
+        except Exception:
+            continue
+        res.append((ds, parse_opening_from_rules(rules), slots))
+    return res
+
+
 def mode_snipe():
-    """Attend l'ouverture exacte (lue dans l'API) puis mitraille."""
-    now0 = dt.datetime.now(PARIS_TZ)
-    date_str = snipe_play_date(now0, ADVANCE_DAYS, TARGET_WEEKDAYS)
-    if not date_str:
-        print("[snipe] Aucune date cible à viser aujourd'hui.")
-        return False
-    print(f"[snipe] Date jouable visée : {date_str} (fenêtre {WINDOW_START}-{WINDOW_END})")
-
-    # 1) lire l'heure d'ouverture annoncée par l'API
-    slots, rules, server_date = fetch_day(date_str)
-    if slots:
-        print("[snipe] Des créneaux sont DÉJÀ ouverts — je notifie tout de suite.")
-        announce(date_str, slots)
-        return True
-    opening = parse_opening_from_rules(rules)
-    now = server_now(server_date)
-    if opening is None:
-        print(f"[snipe] Heure d'ouverture introuvable dans l'API (rules={rules!r}).")
-        print("        Je mitraille quand même pendant la durée max.")
-        target = now
-    else:
-        print(f"[snipe] Ouverture annoncée par l'API : {opening:%Y-%m-%d %H:%M:%S} "
-              f"(heure serveur actuelle : {now:%H:%M:%S})")
-        target = opening
-
-    # 2) attendre jusqu'à SNIPE_LEAD_MS avant l'ouverture.
-    #    On se base sur l'horloge SERVEUR (estimée via l'offset machine/serveur) pour
-    #    ne pas dépendre de l'heure locale de la machine.
+    """Trouve le prochain créneau week-end (10h-13h) dont la réservation s'OUVRE bientôt,
+    attend la seconde d'ouverture (lue dans l'API), mitraille, puis notifie.
+    Marche quel que soit le décalage réel (5 j, 7 j…) : on lit l'ouverture dans l'API."""
+    # horloge serveur
+    _, sd = http_get(availabilities_url(
+        (dt.datetime.now(PARIS_TZ)).date().isoformat(), WINDOW_START, WINDOW_END))
+    now = server_now(sd)
     _SRV_OFFSET["value"] = (now - dt.datetime.now(PARIS_TZ)).total_seconds()
+    print(f"[snipe] {now:%Y-%m-%d %H:%M:%S} (serveur) — recherche d'un créneau "
+          f"{WINDOW_START}-{WINDOW_END} (sam/dim) en cours d'ouverture.")
+
+    scans = scan_openings(now, TARGET_WEEKDAYS, SNIPE_SCAN_HORIZON_DAYS)
+
+    # 1) déjà ouvert ? -> on saute sur l'occasion
+    for ds, op, slots in scans:
+        if slots:
+            print(f"[snipe] {ds} : créneaux déjà ouverts -> notif immédiate.")
+            announce(ds, slots)
+            return True
+
+    # 2) prochaine ouverture FUTURE (tolérance -2 min si on a cliqué pile à l'heure)
+    future = [(op, ds) for ds, op, slots in scans if op and (op - now).total_seconds() > -120]
+    if not future:
+        nexts = sorted([(op, ds) for ds, op, _ in scans if op])
+        lines = " ; ".join(f"{ds} ouvre {op:%a %d/%m %Hh%M}" for op, ds in nexts[:4])
+        print(f"[snipe] Aucune ouverture imminente. Prochaines : {lines or 'inconnues'}")
+        notify("🎾 Shotgun : rien d'imminent",
+               f"Prochaines ouvertures : {lines or 'inconnues'}",
+               priority="default", tags="information")
+        return False
+
+    target_op, target_ds = min(future, key=lambda x: x[0])
+    wait_min = (target_op - now).total_seconds() / 60.0
+    print(f"[snipe] Cible : {target_ds}, ouverture {target_op:%Y-%m-%d %H:%M:%S} "
+          f"(dans {wait_min:.1f} min).")
+    if wait_min > SNIPE_MAX_WAIT_MIN:
+        # ouverture pas imminente : on n'attend pas (sinon on bloque le job pour rien),
+        # on prévient à quelle heure relancer le bouton (~5 min avant).
+        print(f"[snipe] Ouverture à plus de {SNIPE_MAX_WAIT_MIN} min -> j'arrête et je te dis quand relancer.")
+        notify("🎾 Prochain shotgun",
+               f"{target_ds} : réservation ouvre {target_op:%a %d/%m à %Hh%M}. "
+               f"Relance le bouton ~5 min avant.",
+               priority="default", tags="alarm_clock")
+        return False
+
+    # 3) attendre jusqu'à SNIPE_LEAD_MS avant l'ouverture (horloge serveur)
     while True:
-        left = (target - server_now_estimate(date_str)).total_seconds() - SNIPE_LEAD_MS / 1000.0
+        left = (target_op - server_now_estimate(target_ds)).total_seconds() - SNIPE_LEAD_MS / 1000.0
         if left <= 0:
             break
         if left > 90:
-            # longue attente : dors gros, puis on resynchronisera l'horloge serveur
-            _SRV_OFFSET["value"] = None   # force une resynchro au prochain estimate()
+            _SRV_OFFSET["value"] = None   # resynchro horloge au prochain estimate()
             print(f"[snipe] Attente {left:.0f}s avant l'ouverture…")
             time.sleep(min(left - 30, 300))
         else:
             time.sleep(min(left, 2))
 
-    # 3) mitraillage
-    print(f"[snipe] 🔫 Mitraillage ! (toutes les {POLL_INTERVAL_MS} ms, max {MAX_SNIPE_SECONDS}s)")
+    # 4) mitraillage
+    print(f"[snipe] 🔫 Mitraillage {target_ds} ! (toutes les {POLL_INTERVAL_MS} ms, "
+          f"max {MAX_SNIPE_SECONDS}s)")
     deadline = time.time() + MAX_SNIPE_SECONDS
     tries = 0
     while time.time() < deadline:
         tries += 1
         try:
-            slots, _, _ = fetch_day(date_str)
-        except Exception as e:
+            slots, _, _ = fetch_day(target_ds)
+        except Exception:
             slots = []
         if slots:
             print(f"[snipe] Trouvé après {tries} requêtes.")
-            announce(date_str, slots)
+            announce(target_ds, slots)
             return True
         time.sleep(POLL_INTERVAL_MS / 1000.0)
-    print(f"[snipe] Rien trouvé après {tries} requêtes. (Tout est parti, ou ouverture décalée.)")
+    print(f"[snipe] Rien capté après {tries} requêtes.")
     notify("🎾 Shotgun : raté",
-           f"Aucun court 10-13h capté pour le {date_str} après {tries} essais.",
-           priority="default", tags="warning")
+           f"Aucun court {WINDOW_START}-{WINDOW_END} capté pour le {target_ds} "
+           f"après {tries} essais.", priority="default", tags="warning")
     return False
 
 
@@ -410,9 +449,17 @@ def mode_test():
     except Exception as e:
         print(f"ERREUR API : {e}")
         return
-    # 2) dates cibles
-    print(f"Mode 'now' viserait : {next_target_dates(today, ADVANCE_DAYS, TARGET_WEEKDAYS)}")
-    print(f"Mode 'snipe' viserait : {snipe_play_date(today, ADVANCE_DAYS, TARGET_WEEKDAYS)}")
+    # 2) ouvertures réelles des prochains week-ends (pour vérifier la règle 5j/7j)
+    print("\nProchaines ouvertures de réservation (sam/dim) d'après l'API :")
+    server_t = server_now(sd)
+    for ds, op, slots in scan_openings(server_t, TARGET_WEEKDAYS, SNIPE_SCAN_HORIZON_DAYS):
+        if slots:
+            print(f"  {ds} ({len(slots)} créneau(x) DÉJÀ ouverts dans {WINDOW_START}-{WINDOW_END})")
+        elif op:
+            delta = (op - server_t).total_seconds() / 3600.0
+            print(f"  {ds} -> ouvre {op:%a %d/%m à %Hh%M}  (dans {delta:.1f} h)")
+        else:
+            print(f"  {ds} -> pas d'info d'ouverture")
     # 3) notif de test
     print(f"NTFY_TOPIC = {NTFY_TOPIC or '(non défini)'}")
     notify("🎾 Test shotgun", "Si tu vois cette notif, le push fonctionne ✔",
