@@ -1,0 +1,68 @@
+name: Shotgun Tennis Luxembourg
+
+# ────────────────────────────────────────────────────────────────────────────
+# Ce workflow lance le sniper de créneaux. Deux façons de le déclencher :
+#
+#  1) AUTOMATIQUE (programmé) : les lignes "schedule" ci-dessous lancent le
+#     script juste avant chaque ouverture (samedi & dimanche, avant 10h/11h/12h
+#     heure de Paris). Le script lit l'heure d'ouverture exacte dans l'API et
+#     attend la seconde précise avant de mitrailler.
+#
+#  2) MANUEL : depuis ton iPhone (raccourci Shortcuts) ou depuis le bouton
+#     "Run workflow" de GitHub. Le déclenchement iPhone passe par
+#     "repository_dispatch" (voir le README).
+#
+# ⚠️ Les heures de "schedule" sont en UTC. Réglées pour l'HEURE D'ÉTÉ de Paris
+#    (CEST = UTC+2). En hiver, le script attendra simplement ~1h de plus tout
+#    seul (il se cale sur l'horloge du serveur AnyBuddy), donc ça marche quand
+#    même — mets juste le repo en PUBLIC pour avoir des minutes Actions illimitées.
+# ────────────────────────────────────────────────────────────────────────────
+
+on:
+  schedule:
+    - cron: '55 7 * * 6,0'   # ~09h55 Paris (été) -> vise l'ouverture de 10h00
+    - cron: '55 8 * * 6,0'   # ~10h55 Paris (été) -> vise l'ouverture de 11h00
+    - cron: '55 9 * * 6,0'   # ~11h55 Paris (été) -> vise l'ouverture de 12h00
+  workflow_dispatch:          # bouton "Run workflow" dans l'onglet Actions
+    inputs:
+      mode:
+        description: "Mode (snipe = attendre l'ouverture, now = chercher tout de suite)"
+        required: true
+        default: "now"
+        type: choice
+        options: [now, snipe]
+  repository_dispatch:        # déclenchement depuis l'iPhone (raccourci Shortcuts)
+    types: [shotgun]
+
+jobs:
+  snipe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      # Le canal de notification (à créer comme "secret" du repo : Settings > Secrets)
+      NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+      # Réglages du club / fenêtre (modifiables ici)
+      CLUB_ID: tennis-jardin-du-luxembourg
+      TARGET_WEEKDAYS: "5,6"     # 5=samedi 6=dimanche
+      WINDOW_START: "10:00"
+      WINDOW_END: "12:00"        # créneau d'1h démarrant au plus tard à 12h (fin 13h)
+      ADVANCE_DAYS: "7"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Déterminer le mode
+        id: pick
+        run: |
+          # Par défaut : snipe (pour le schedule). Manuel : on lit l'input/payload.
+          MODE="snipe"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            MODE="${{ github.event.inputs.mode }}"
+          elif [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            MODE="${{ github.event.client_payload.mode }}"
+            if [ -z "$MODE" ] || [ "$MODE" = "null" ]; then MODE="now"; fi
+          fi
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          echo "Mode retenu : $MODE"
+
+      - name: Lancer le sniper
+        run: python3 shotgun.py --mode "${{ steps.pick.outputs.mode }}"
