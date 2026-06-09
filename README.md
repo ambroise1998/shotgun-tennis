@@ -83,7 +83,7 @@ GitHub Actions exécute le script gratuitement, même téléphone et ordi étein
 4. Ajoute ton canal ntfy comme **secret** :
    *Settings → Secrets and variables → Actions → New repository secret*
    - **Name** : `NTFY_TOPIC`
-   - **Secret** : `lux-tennis-ambroise-7h3k9q` (ton nom de canal)
+   - **Secret** : `wwwwwwwwwww` (ton nom de canal)
 5. Active les workflows : onglet **Actions** → *I understand my workflows, go ahead and enable them*.
 
 ✅ **À partir d'ici, le déclenchement AUTOMATIQUE fonctionne déjà** : chaque samedi et
